@@ -37,17 +37,17 @@ cd APB-I2S
 ```
 
 ### Simulation
-1. **Open your simulator** and add `i2s.v` and `testI2S.v` to the project.
+1. **Open your simulator** and add `i2s.v` and `I2S_TB.v` to the project.
 2. **Compile** the Verilog files.
 3. **Run the simulation** using the testbench:
     ```bash
-    vlog i2s.v testI2S.v   # Compile the code (ModelSim example)
-    vsim testI2S           # Simulate the testbench
+    vlog i2s.v I2S_TB.v   # Compile the code (ModelSim example)
+    vsim I2S_TB.v           # Simulate the testbench
     ```
 
 ### Files
 - `i2s.v`: This is the main Verilog file implementing the I2S interface using an APB bus protocol for data and control.
-- `testI2S.v`: Testbench for simulating the behavior of the I2S module. It writes data to the FIFO and verifies clock generation and data output.
+- `I2S_TB.v`: Testbench for simulating the behavior of the I2S module. It writes data to the FIFO and verifies clock generation and data output.
 
 ### Testbench Walkthrough
 - The testbench initializes the APB signals and writes a sequence of data values to the FIFO.
