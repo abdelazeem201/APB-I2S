@@ -1,3 +1,27 @@
+/*
+ * Testbench: I2S Interface Module Testbench
+ * Author: Ahmed Abdelazeem
+ * Email: a.abdelazeem201@gmail.com
+ * 
+ * Purpose:
+ * This Verilog testbench is used to simulate and verify the functionality of the I2S 
+ * Interface module. The testbench provides input stimulus to the I2S module, simulating 
+ * different APB transactions (reads and writes), and monitors the module's output signals 
+ * such as the serial clock (sck), word select (ws), and serial data (sd). 
+ * 
+ * Key Features:
+ * - Generates a 100 MHz clock signal to simulate the APB clock
+ * - Simulates a system reset and basic read/write transactions on the APB bus
+ * - Tests writing to various registers such as control, interrupt, and FIFO data registers
+ * - Monitors the serial outputs (sck, ws, sd) and IRQ to verify module behavior
+ * 
+ * Intended Use:
+ * This testbench is designed to validate the I2S module's behavior in a simulated environment. 
+ * It is intended to ensure that the module operates correctly before integration into 
+ * a larger system or design. The testbench can be used to test various configurations 
+ * and input conditions, making it easier to debug and verify functionality.
+ */
+
 `timescale 1ns/1ns
 
 module testI2S;
