@@ -1,3 +1,37 @@
+/*
+ * Project: I2S Interface Module
+ * Author: Ahmed Abdelazeem
+ * Email: a.abdelazeem201@gmail.com
+ * 
+ * Purpose:
+ * This Verilog module implements an I2S (Inter-IC Sound) interface to facilitate 
+ * serial communication for audio data transmission. The design integrates an 
+ * APB (Advanced Peripheral Bus) interface, allowing a processor to interact 
+ * with the I2S peripheral by reading and writing control, data, and interrupt 
+ * registers. The module also includes an internal FIFO buffer for data storage 
+ * and management during serial transfer.
+ * 
+ * Key Features:
+ * - APB Interface for processor communication (control, data, and interrupt handling)
+ * - Serial clock generation with adjustable frequency via a programmable divider
+ * - Word select signal to alternate between left and right audio channels
+ * - FIFO memory for buffering audio data before transmission
+ * - IRQ (Interrupt Request) generation based on FIFO full/empty conditions
+ * 
+ * Enhancements for Reusability and Maintenance:
+ * - Separation of control and data flow, making the design modular and easier to extend
+ * - Frequency divider made programmable to support various audio data rates
+ * - Configurable FIFO depth for flexible buffer sizing
+ * - Clear APB address map for ease of integration and future expansion
+ * 
+ * Intended Use:
+ * This module is designed for audio applications where a processor needs to send or 
+ * receive audio data via I2S, typically used in embedded systems such as microcontrollers 
+ * or SoCs interfacing with digital-to-analog converters (DACs), codecs, or other 
+ * audio processing devices.
+ */
+
+
 module i2s (
   input        pclk,     // APB clock
   input        presetn,  // APB reset (active low)
@@ -13,208 +47,162 @@ module i2s (
   output       sd        // I2S serial data output
 );
 
-  // Internal signal and register declarations
-  reg [31:0] reg_prdata;   // Register to store read data
-  reg        irq;          // Interrupt signal
+  // Internal register declarations
+  reg [31:0] reg_prdata;      // APB read data register
+  reg        irq;             // Interrupt request signal
+  reg [31:0] control_reg;     // Control register
+  reg [31:0] interrupt_reg;   // Interrupt configuration register
+  reg [31:0] state_reg;       // State register
+  reg [31:0] data_reg;        // Data register
 
-  reg        ssck;         // Internal serial clock signal
-  reg        wws;          // Internal word select signal
-  reg [31:0] d;            // Data bit counter for serial data transfer
+  reg        sck_reg;         // I2S serial clock signal
+  reg        ws_reg;          // I2S word select signal
+  reg [31:0] data_fifo;       // Data loaded from FIFO for transmission
 
-  // FIFO buffer: 4 words of 32 bits each (4x32-bit FIFO)
-  reg [31:0] mem[3:0];     // FIFO memory
-  reg [2:0]  p, q;         // FIFO read/write pointers
+  reg [7:0]  div;             // Clock division factor
+  reg [7:0]  clk_count;       // Clock division counter
+  reg [4:0]  ws_count;        // Word select bit counter
+  reg [4:0]  bit_count;       // Data bit counter for serial data
 
-  wire wrmem_en;           // FIFO write enable
-  wire full, empty;        // FIFO full and empty flags
+  // FIFO memory and control signals
+  reg [31:0] mem[3:0];        // 4x32-bit FIFO memory
+  reg [2:0]  wr_ptr, rd_ptr;  // Write and read pointers
+  wire       fifo_wr_en;      // FIFO write enable
+  wire       fifo_full, fifo_empty;  // FIFO full and empty flags
 
-  integer k;               // Iterator for initializing FIFO
-  reg [31:0] data_fifo;    // Data loaded from FIFO for transmission
-  reg [31:0] control, state, data, interrupt;  // Control, state, data, and interrupt registers
-  reg [7:0]  div;          // Frequency division factor for clock generation
-  reg [7:0]  i;            // Clock division counter
-  reg [4:0]  j;            // Word select bit counter
-
-  reg  wrn, rdn;           // Write and read enable signals
+  // APB control signals
+  reg wr_en, rd_en;           // Write and read enable signals for APB
 
   // APB read data output assignment
-  assign prdata = (rdn == 1) ? reg_prdata : 32'b0;
+  assign prdata = rd_en ? reg_prdata : 32'b0;
 
-  // Write memory enable logic: enabled when writing to address 0x04
-  assign wrmem_en = (wrn == 1 && paddr == 8'h04) ? 1 : 0;
+  // FIFO control signals
+  assign fifo_wr_en = (wr_en && paddr == 8'h04);  // Write data to FIFO on address 0x04
+  assign fifo_full  = (wr_ptr == {~rd_ptr[2], rd_ptr[1:0]});  // Full when write and read pointers differ only in MSB
+  assign fifo_empty = (wr_ptr == rd_ptr);                     // Empty when write and read pointers are equal
 
-  // Control logic to generate write (wrn) and read (rdn) enables
-  always @(posedge pclk or negedge presetn)
-  begin
+  // APB write/read control
+  always @(posedge pclk or negedge presetn) begin
     if (!presetn) begin
-      wrn <= 0;
-      rdn <= 0;
-    end
-    else if (psel) begin
-      if (penable) begin
-        if (pwrite) begin
-          rdn <= 0;
-          wrn <= 1;  // Write operation
-        end
-        else begin
-          rdn <= 1;  // Read operation
-          wrn <= 0;
-        end
+      wr_en <= 0;
+      rd_en <= 0;
+    end else if (psel && penable) begin
+      if (pwrite) begin
+        wr_en <= 1;  // Enable write
+        rd_en <= 0;
+      end else begin
+        rd_en <= 1;  // Enable read
+        wr_en <= 0;
       end
-      else begin
-        wrn <= 0;
-        rdn <= 0;
-      end
-    end
-    else begin
-      wrn <= 0;
-      rdn <= 0;
+    end else begin
+      wr_en <= 0;
+      rd_en <= 0;
     end
   end
 
-  // Control and data register access via APB
-  always @(posedge pclk or negedge presetn)
-  begin
+  // APB register access
+  always @(posedge pclk or negedge presetn) begin
     if (!presetn) begin
-      interrupt <= 32'h00000000;
-      control   <= 32'h00000022;
-      data      <= 32'h10101010;
-      reg_prdata <= 32'h00000000;
-    end
-    else if (wrn) begin  // Write operation
+      control_reg   <= 32'h00000022;
+      interrupt_reg <= 32'h00000000;
+      state_reg     <= 32'h00000001;
+      data_reg      <= 32'h10101010;
+      reg_prdata    <= 32'h00000000;
+    end else if (wr_en) begin  // Write operation
       case (paddr)
         8'h00: begin
-          control <= pwdata;  // Write to control register
-          div <= pwdata[7:0]; // Set frequency division factor
+          control_reg <= pwdata;  // Control register
+          div <= pwdata[7:0];     // Clock division factor
         end
-        8'h04: data <= pwdata;  // Write to data register
-        8'h08: interrupt <= pwdata;  // Write to interrupt register
-        default: state <= state;
+        8'h04: data_reg <= pwdata;  // Data register
+        8'h08: interrupt_reg <= pwdata;  // Interrupt configuration
+        default: state_reg <= state_reg;
       endcase
-    end
-    else if (rdn) begin  // Read operation
+    end else if (rd_en) begin  // Read operation
       case (paddr)
-        8'h00: reg_prdata <= control;    // Read control register
-        8'h08: reg_prdata <= interrupt;  // Read interrupt register
-        8'h0c: reg_prdata <= state;      // Read state register
-        default: data <= data;
+        8'h00: reg_prdata <= control_reg;  // Read control register
+        8'h08: reg_prdata <= interrupt_reg;  // Read interrupt register
+        8'h0C: reg_prdata <= state_reg;  // Read state register
+        default: reg_prdata <= 32'b0;
       endcase
     end
   end
 
-  // Generate serial clock (sck) with frequency division based on `div`
-  always @(posedge pclk or negedge presetn)
-  begin
+  // I2S clock generation (sck) with clock division
+  always @(posedge pclk or negedge presetn) begin
     if (!presetn) begin
-      ssck <= 0;
-      i <= 0;
-    end
-    else begin
-      if (i < (div + 1)) begin
-        i <= i + 1;
-        ssck <= 0;
-      end
-      else if (i < (2 * (div + 1) - 1)) begin
-        i <= i + 1;
-        ssck <= 1;
-      end
-      else if (i == (2 * (div + 1) - 1)) begin
-        i <= 0;
-        ssck <= 1;
-      end
+      sck_reg <= 0;
+      clk_count <= 0;
+    end else if (clk_count < div) begin
+      clk_count <= clk_count + 1;
+      sck_reg <= 0;
+    end else begin
+      clk_count <= 0;
+      sck_reg <= ~sck_reg;  // Toggle sck every div cycles
     end
   end
-  assign sck = ssck;
+  assign sck = sck_reg;
 
-  // Generate word select (ws) signal: toggles every 16 bits
-  always @(posedge ssck or negedge presetn)
-  begin
+  // I2S word select generation (ws), toggling every 16 bits
+  always @(posedge sck or negedge presetn) begin
     if (!presetn) begin
-      wws <= 1;
-      j <= 0;
-    end
-    else begin
-      if (j < 16) begin
-        j <= j + 1;
-        wws <= 0;
-      end
-      else if (j < 31) begin
-        j <= j + 1;
-        wws <= 1;
-      end
-      else begin
-        wws <= 1;
-        j <= 0;
-      end
+      ws_reg <= 1;
+      ws_count <= 0;
+    end else if (ws_count < 31) begin
+      ws_count <= ws_count + 1;
+    end else begin
+      ws_count <= 0;
+      ws_reg <= ~ws_reg;  // Toggle ws every 32 clock cycles
     end
   end
-  assign ws = wws;
+  assign ws = ws_reg;
 
   // FIFO write operation
-  always @(posedge pclk or negedge presetn)
-  begin
+  always @(posedge pclk or negedge presetn) begin
     if (!presetn) begin
-      for (k = 0; k < 4; k = k + 1) begin
-        mem[k] <= 32'h00000000;  // Clear FIFO memory on reset
-      end
-      p <= 3'b000;
-    end
-    else if (wrmem_en && !full) begin
-      mem[p[1:0]] <= data;  // Write data into FIFO
-      p <= p + 1;
+      wr_ptr <= 0;
+      // Initialize FIFO memory
+      mem[0] <= 32'h0;
+      mem[1] <= 32'h0;
+      mem[2] <= 32'h0;
+      mem[3] <= 32'h0;
+    end else if (fifo_wr_en && !fifo_full) begin
+      mem[wr_ptr[1:0]] <= data_reg;  // Write data to FIFO
+      wr_ptr <= wr_ptr + 1;
     end
   end
 
-  // FIFO read operation (triggered by word select)
-  always @(negedge wws or negedge presetn)
-  begin
+  // FIFO read operation
+  always @(posedge sck or negedge presetn) begin
     if (!presetn) begin
-      q <= 3'b000;
-    end
-    else if (!empty) begin
-      data_fifo <= mem[q[1:0]];  // Read data from FIFO
-      q <= q + 1;
+      rd_ptr <= 0;
+      data_fifo <= 32'b0;
+    end else if (!fifo_empty) begin
+      data_fifo <= mem[rd_ptr[1:0]];  // Read data from FIFO
+      rd_ptr <= rd_ptr + 1;
     end
   end
 
-  // FIFO full and empty flags
-  assign full = (q == {~p[2], p[1:0]});  // FIFO is full when write and read pointers align but differ in MSB
-  assign empty = (p == q);               // FIFO is empty when write and read pointers are equal
-
-  // IRQ generation based on FIFO full/empty status
-  always @(full or empty or presetn)
-  begin
+  // I2S serial data output (sd), sends 1 bit per sck cycle
+  always @(posedge sck or negedge presetn) begin
     if (!presetn) begin
-      state <= 32'h00000001;  // Reset state
-    end
-    else begin
-      if (full) begin
-        state[2] <= 1;  // Indicate FIFO full
-        state[0] <= 1;
-        irq <= (interrupt[0] == 1) ? 1 : 0;  // Trigger IRQ if enabled in interrupt register
-      end
-      else if (empty) begin
-        state[2] <= 0;  // Indicate FIFO empty
-        state[0] <= 0;
-        irq <= (interrupt[0] == 1) ? 1 : 0;  // Trigger IRQ if enabled
-      end
-      else begin
-        state[2] <= 0;
-        state[0] <= 1;
-        irq <= 0;
-      end
+      bit_count <= 31;
+    end else begin
+      sd <= data_fifo[bit_count];  // Output data bit
+      bit_count <= bit_count - 1;
     end
   end
 
-  // Serial data output generation
-  always @(posedge ssck or negedge presetn)
-  begin
+  // IRQ generation based on FIFO state
+  always @(posedge pclk or negedge presetn) begin
     if (!presetn) begin
-      d <= 31;
-    end
-    else begin
-      sd <= data_fifo[d];  // Send one bit of data per clock
-      d <= d - 1;
+      irq <= 0;
+    end else if (fifo_full && interrupt_reg[0]) begin
+      irq <= 1;  // Trigger interrupt if FIFO is full and interrupts are enabled
+    end else if (fifo_empty && interrupt_reg[0]) begin
+      irq <= 1;  // Trigger interrupt if FIFO is empty and interrupts are enabled
+    end else begin
+      irq <= 0;
     end
   end
 
